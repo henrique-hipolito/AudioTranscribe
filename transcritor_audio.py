@@ -1,9 +1,11 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 import requests
 import os
 from pathlib import Path
 import json
+import tempfile
+import ffmpeg
 
 class TranscritorAudio:
     def __init__(self, root):
@@ -15,6 +17,9 @@ class TranscritorAudio:
         # Arquivo de configuração para salvar a API key
         self.config_file = Path.home() / ".transcritor_config.json"
         self.api_key = self.carregar_api_key()
+        
+        # Variável para qualidade do áudio
+        self.qualidade_audio = tk.StringVar(value="64")
         
         self.criar_interface()
         
@@ -68,6 +73,23 @@ class TranscritorAudio:
                                    padx=20, pady=10)
         btn_selecionar.pack(pady=5)
         
+        # Frame para qualidade de compressão
+        frame_qualidade = tk.LabelFrame(frame_arquivo, text="Qualidade de Compressão (para arquivos > 50MB)", 
+                                       padx=10, pady=5)
+        frame_qualidade.pack(pady=10, fill="x")
+        
+        radio_64 = tk.Radiobutton(frame_qualidade, 
+                                 text="🎯 Padrão (64kbps) - Recomendado para voz",
+                                 variable=self.qualidade_audio, 
+                                 value="64")
+        radio_64.pack(anchor="w", pady=2)
+        
+        radio_128 = tk.Radiobutton(frame_qualidade, 
+                                  text="💎 Alta Qualidade (128kbps)",
+                                  variable=self.qualidade_audio, 
+                                  value="128")
+        radio_128.pack(anchor="w", pady=2)
+        
         # Botão de transcrever
         self.btn_transcrever = tk.Button(self.root, text="🎤 Transcrever Áudio", 
                                         command=self.transcrever,
@@ -87,7 +109,7 @@ class TranscritorAudio:
                                                          font=("Arial", 10))
         self.texto_resultado.pack(fill="both", expand=True)
         
-        # Botão para copiar resultado
+        # Copiar resultado
         btn_copiar = tk.Button(frame_resultado, text="📋 Copiar Transcrição", 
                               command=self.copiar_resultado)
         btn_copiar.pack(pady=5)
@@ -130,9 +152,47 @@ class TranscritorAudio:
         
         if filename:
             self.arquivo_selecionado = filename
-            self.label_arquivo.config(text=f"Arquivo: {os.path.basename(filename)}", fg="black")
+            tamanho_mb = os.path.getsize(filename) / (1024 * 1024)
+            info_arquivo = f"Arquivo: {os.path.basename(filename)} ({tamanho_mb:.1f} MB)"
+            self.label_arquivo.config(text=info_arquivo, fg="black")
             self.btn_transcrever.config(state="normal")
             self.status_label.config(text=f"Arquivo selecionado: {filename}")
+    
+    def comprimir_audio(self, arquivo_path, bitrate="64k"):
+        """Comprime o arquivo de áudio para o bitrate especificado"""
+        try:
+            self.status_label.config(text=f"Comprimindo áudio para {bitrate}... Por favor, aguarde...")
+            self.root.update()
+            
+            # Cria arquivo temporário
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_path = temp_file.name
+            temp_file.close()
+            
+            # Comprime
+            stream = ffmpeg.input(arquivo_path)
+            stream = ffmpeg.output(stream, temp_path, 
+                                   audio_bitrate=bitrate,
+                                   format='mp3',
+                                   acodec='libmp3lame')
+            
+            # Executa a conversão (sobrescreve se existir)
+            ffmpeg.run(stream, overwrite_output=True, quiet=True)
+            
+            tamanho_original = os.path.getsize(arquivo_path) / (1024 * 1024)
+            tamanho_comprimido = os.path.getsize(temp_path) / (1024 * 1024)
+            
+            self.status_label.config(
+                text=f"Compressão concluída: {tamanho_original:.1f}MB → {tamanho_comprimido:.1f}MB"
+            )
+            
+            return temp_path
+            
+        except ffmpeg.Error as e:
+            erro_msg = e.stderr.decode() if e.stderr else str(e)
+            raise Exception(f"Erro ao comprimir áudio: {erro_msg}")
+        except Exception as e:
+            raise Exception(f"Erro ao comprimir áudio: {str(e)}")
     
     def transcrever(self):
         """Envia o áudio para transcrição"""
@@ -146,19 +206,51 @@ class TranscritorAudio:
             messagebox.showerror("Erro", "Por favor, selecione um arquivo de áudio!")
             return
         
-        # Desabilita botão durante o processamento
+        # Desabilitando botão no processamento
         self.btn_transcrever.config(state="disabled")
-        self.status_label.config(text="Transcrevendo... Por favor, aguarde...")
+        self.status_label.config(text="Processando... Por favor, aguarde...")
         self.root.update()
         
+        arquivo_para_enviar = self.arquivo_selecionado
+        arquivo_temporario = None
+        
         try:
+            # Tamanho do arquivo
+            tamanho_bytes = os.path.getsize(self.arquivo_selecionado)
+            tamanho_mb = tamanho_bytes / (1024 * 1024)
+            limite_mb = 50
+            
+            # Comprime arquivo
+            if tamanho_mb > limite_mb:
+                bitrate = f"{self.qualidade_audio.get()}k"
+                self.status_label.config(
+                    text=f"Arquivo grande ({tamanho_mb:.1f}MB). Comprimindo para {bitrate}..."
+                )
+                self.root.update()
+                
+                arquivo_temporario = self.comprimir_audio(self.arquivo_selecionado, bitrate)
+                arquivo_para_enviar = arquivo_temporario
+                
+                # Verifica se ainda está muito grande após compressão
+                tamanho_comprimido = os.path.getsize(arquivo_para_enviar) / (1024 * 1024)
+                if tamanho_comprimido > limite_mb:
+                    messagebox.showwarning(
+                        "Arquivo ainda grande",
+                        f"Mesmo após compressão, o arquivo tem {tamanho_comprimido:.1f}MB.\n"
+                        f"Tentando enviar mesmo assim..."
+                    )
+            
+            # Envia para API
+            self.status_label.config(text="Enviando para transcrição... Por favor, aguarde...")
+            self.root.update()
+            
             url = "https://api.groq.com/openai/v1/audio/transcriptions"
             
             headers = {
                 "Authorization": f"Bearer {api_key}"
             }
             
-            with open(self.arquivo_selecionado, "rb") as audio_file:
+            with open(arquivo_para_enviar, "rb") as audio_file:
                 files = {
                     "file": (os.path.basename(self.arquivo_selecionado), audio_file)
                 }
@@ -190,6 +282,13 @@ class TranscritorAudio:
             messagebox.showerror("Erro", f"Erro inesperado: {str(e)}")
             self.status_label.config(text=f"Erro: {str(e)}")
         finally:
+            # Limpa arquivo temporário
+            if arquivo_temporario and os.path.exists(arquivo_temporario):
+                try:
+                    os.unlink(arquivo_temporario)
+                except:
+                    pass
+            
             self.btn_transcrever.config(state="normal")
     
     def copiar_resultado(self):

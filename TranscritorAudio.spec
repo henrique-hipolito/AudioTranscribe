@@ -4,7 +4,7 @@
 a = Analysis(
     ['transcritor_audio.py'],
     pathex=[],
-    binaries=[],
+    binaries=[('C:\\Users\\henrique.hipolito\\Documents\\Python\\Transcrever-GUI\\ffmpeg_bin\\ffmpeg.exe', '.'), ('C:\\Users\\henrique.hipolito\\Documents\\Python\\Transcrever-GUI\\ffmpeg_bin\\ffprobe.exe', '.')],
     datas=[],
     hiddenimports=[],
     hookspath=[],
