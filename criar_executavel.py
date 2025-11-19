@@ -23,15 +23,6 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pyinstaller"])
     print("✓ PyInstaller instalado com sucesso!")
 
-# Verifica se o ffmpeg-python está instalado
-try:
-    import ffmpeg
-    print("✓ ffmpeg-python encontrado!")
-except ImportError:
-    print("✗ ffmpeg-python não encontrado. Instalando...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "ffmpeg-python"])
-    print("✓ ffmpeg-python instalado com sucesso!")
-
 print()
 print("Baixando ffmpeg...")
 print("(Necessário para compressão de áudio)")

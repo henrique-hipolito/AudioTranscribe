@@ -1,11 +1,16 @@
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 import requests
+import urllib3
 import os
 from pathlib import Path
 import json
 import tempfile
-import ffmpeg
+import subprocess
+import sys
+
+# Desabilita warnings de SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class TranscritorAudio:
     def __init__(self, root):
@@ -18,8 +23,7 @@ class TranscritorAudio:
         self.config_file = Path.home() / ".transcritor_config.json"
         self.api_key = self.carregar_api_key()
         
-        # Variável para qualidade do áudio
-        self.qualidade_audio = tk.StringVar(value="64")
+        # Variável para qualidade de áudio não é mais necessária
         
         self.criar_interface()
         
@@ -33,6 +37,27 @@ class TranscritorAudio:
             except:
                 return ''
         return ''
+    
+    def encontrar_ffmpeg(self):
+        """Tenta encontrar o executável do ffmpeg"""
+        # Se estiver rodando como executável PyInstaller
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+            ffmpeg_path = os.path.join(base_path, 'ffmpeg.exe')
+            if os.path.exists(ffmpeg_path):
+                return ffmpeg_path
+        
+        # Tenta usar ffmpeg do PATH do sistema
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], 
+                                  capture_output=True, 
+                                  timeout=5)
+            if result.returncode == 0:
+                return 'ffmpeg'
+        except:
+            pass
+        
+        return None
     
     def salvar_api_key(self, api_key):
         """Salva a API key no arquivo de configuração"""
@@ -73,22 +98,13 @@ class TranscritorAudio:
                                    padx=20, pady=10)
         btn_selecionar.pack(pady=5)
         
-        # Frame para qualidade de compressão
-        frame_qualidade = tk.LabelFrame(frame_arquivo, text="Qualidade de Compressão (para arquivos > 50MB)", 
-                                       padx=10, pady=5)
-        frame_qualidade.pack(pady=10, fill="x")
-        
-        radio_64 = tk.Radiobutton(frame_qualidade, 
-                                 text="🎯 Padrão (64kbps) - Recomendado para voz",
-                                 variable=self.qualidade_audio, 
-                                 value="64")
-        radio_64.pack(anchor="w", pady=2)
-        
-        radio_128 = tk.Radiobutton(frame_qualidade, 
-                                  text="💎 Alta Qualidade (128kbps)",
-                                  variable=self.qualidade_audio, 
-                                  value="128")
-        radio_128.pack(anchor="w", pady=2)
+        # Informação sobre compressão automática
+        info_label = tk.Label(frame_arquivo, 
+                             text="💡 Arquivos > 25MB são comprimidos automaticamente:\n"
+                                  "• WAV/AIFF → FLAC 16KHz (lossless)\n"
+                                  "• MP3/M4A/OGG → OPUS 32kbps 16KHz (otimizado para voz)",
+                             fg="gray", wraplength=600, justify="left", font=("Arial", 8))
+        info_label.pack(pady=5)
         
         # Botão de transcrever
         self.btn_transcrever = tk.Button(self.root, text="🎤 Transcrever Áudio", 
@@ -109,7 +125,7 @@ class TranscritorAudio:
                                                          font=("Arial", 10))
         self.texto_resultado.pack(fill="both", expand=True)
         
-        # Copiar resultado
+        # Botão para copiar resultado
         btn_copiar = tk.Button(frame_resultado, text="📋 Copiar Transcrição", 
                               command=self.copiar_resultado)
         btn_copiar.pack(pady=5)
@@ -158,39 +174,97 @@ class TranscritorAudio:
             self.btn_transcrever.config(state="normal")
             self.status_label.config(text=f"Arquivo selecionado: {filename}")
     
-    def comprimir_audio(self, arquivo_path, bitrate="64k"):
-        """Comprime o arquivo de áudio para o bitrate especificado"""
+    def comprimir_audio(self, arquivo_path):
+        """Comprime o arquivo de áudio para formato otimizado baseado no tipo original"""
         try:
-            self.status_label.config(text=f"Comprimindo áudio para {bitrate}... Por favor, aguarde...")
+            self.status_label.config(text="Analisando e comprimindo áudio... Por favor, aguarde...")
             self.root.update()
             
+            # Procura ffmpeg
+            ffmpeg_cmd = self.encontrar_ffmpeg()
+            
+            if not ffmpeg_cmd:
+                raise Exception(
+                    "FFmpeg não encontrado!\n\n"
+                    "Para usar a compressão, você precisa:\n"
+                    "1. Criar o executável (.exe) que já vem com ffmpeg incluído:\n"
+                    "   python criar_executavel.py\n\n"
+                    "OU\n\n"
+                    "2. Baixar o ffmpeg manualmente de: https://www.gyan.dev/ffmpeg/builds/\n"
+                    "3. Adicionar ao PATH do Windows\n"
+                    "4. Reiniciar o VSCode"
+                )
+            
+            # Detecta extensão do arquivo
+            extensao = os.path.splitext(arquivo_path)[1].lower()
+            
+            # Define formato de saída e codec baseado no tipo de entrada
+            # WAV/FLAC/AIFF (não comprimidos) -> FLAC (lossless)
+            # MP3/M4A/OGG/AAC (já comprimidos) -> OPUS (mais eficiente)
+            if extensao in ['.wav', '.aiff', '.aif']:
+                # Arquivos não comprimidos: usar FLAC
+                output_ext = '.flac'
+                codec = 'flac'
+                extra_params = []
+                tipo_compressao = "FLAC 16KHz mono"
+            else:
+                # Arquivos já comprimidos: usar OPUS
+                output_ext = '.opus'
+                codec = 'libopus'
+                extra_params = ['-b:a', '32k']  # 32kbps é ótimo para voz a 16KHz
+                tipo_compressao = "OPUS 32kbps 16KHz mono"
+            
             # Cria arquivo temporário
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=output_ext)
             temp_path = temp_file.name
             temp_file.close()
             
-            # Comprime
-            stream = ffmpeg.input(arquivo_path)
-            stream = ffmpeg.output(stream, temp_path, 
-                                   audio_bitrate=bitrate,
-                                   format='mp3',
-                                   acodec='libmp3lame')
+            # Comando ffmpeg para comprimir
+            # -ar 16000: 16KHz sample rate (otimizado para voz)
+            # -ac 1: mono (1 canal)
+            cmd = [
+                ffmpeg_cmd,
+                '-i', arquivo_path,           # Arquivo de entrada
+                '-ar', '16000',               # 16KHz sample rate
+                '-ac', '1',                   # Mono
+                '-map', '0:a',                # Mapear apenas áudio
+            ]
             
-            # Executa a conversão (sobrescreve se existir)
-            ffmpeg.run(stream, overwrite_output=True, quiet=True)
+            # Adiciona codec e parâmetros específicos
+            cmd.extend(['-c:a', codec])
+            cmd.extend(extra_params)
+            cmd.extend(['-y', temp_path])     # Sobrescrever e arquivo de saída
+            
+            self.status_label.config(text=f"Comprimindo para {tipo_compressao}...")
+            self.root.update()
+            
+            # Executa o comando
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300  # Timeout de 5 minutos
+            )
+            
+            if result.returncode != 0:
+                raise Exception(f"Erro do ffmpeg: {result.stderr}")
+            
+            # Verifica se o arquivo foi criado
+            if not os.path.exists(temp_path):
+                raise Exception("Arquivo comprimido não foi criado")
             
             tamanho_original = os.path.getsize(arquivo_path) / (1024 * 1024)
             tamanho_comprimido = os.path.getsize(temp_path) / (1024 * 1024)
+            reducao_percent = ((tamanho_original - tamanho_comprimido) / tamanho_original) * 100
             
             self.status_label.config(
-                text=f"Compressão concluída: {tamanho_original:.1f}MB → {tamanho_comprimido:.1f}MB"
+                text=f"Compressão concluída: {tamanho_original:.1f}MB → {tamanho_comprimido:.1f}MB ({reducao_percent:.0f}% de redução)"
             )
             
             return temp_path
             
-        except ffmpeg.Error as e:
-            erro_msg = e.stderr.decode() if e.stderr else str(e)
-            raise Exception(f"Erro ao comprimir áudio: {erro_msg}")
+        except subprocess.TimeoutExpired:
+            raise Exception("Tempo esgotado durante a compressão. Arquivo muito grande?")
         except Exception as e:
             raise Exception(f"Erro ao comprimir áudio: {str(e)}")
     
@@ -206,7 +280,7 @@ class TranscritorAudio:
             messagebox.showerror("Erro", "Por favor, selecione um arquivo de áudio!")
             return
         
-        # Desabilitando botão no processamento
+        # Desabilita botão durante o processamento
         self.btn_transcrever.config(state="disabled")
         self.status_label.config(text="Processando... Por favor, aguarde...")
         self.root.update()
@@ -215,20 +289,19 @@ class TranscritorAudio:
         arquivo_temporario = None
         
         try:
-            # Tamanho do arquivo
+            # Verifica tamanho do arquivo
             tamanho_bytes = os.path.getsize(self.arquivo_selecionado)
             tamanho_mb = tamanho_bytes / (1024 * 1024)
-            limite_mb = 50
+            limite_mb = 25  # Limite da API Groq para free tier
             
-            # Comprime arquivo
+            # Se arquivo for maior que 25MB, comprime
             if tamanho_mb > limite_mb:
-                bitrate = f"{self.qualidade_audio.get()}k"
                 self.status_label.config(
-                    text=f"Arquivo grande ({tamanho_mb:.1f}MB). Comprimindo para {bitrate}..."
+                    text=f"Arquivo grande ({tamanho_mb:.1f}MB). Comprimindo automaticamente..."
                 )
                 self.root.update()
                 
-                arquivo_temporario = self.comprimir_audio(self.arquivo_selecionado, bitrate)
+                arquivo_temporario = self.comprimir_audio(self.arquivo_selecionado)
                 arquivo_para_enviar = arquivo_temporario
                 
                 # Verifica se ainda está muito grande após compressão
@@ -237,8 +310,13 @@ class TranscritorAudio:
                     messagebox.showwarning(
                         "Arquivo ainda grande",
                         f"Mesmo após compressão, o arquivo tem {tamanho_comprimido:.1f}MB.\n"
-                        f"Tentando enviar mesmo assim..."
+                        f"O limite da API Groq (free tier) é 25MB.\n\n"
+                        f"Sugestões:\n"
+                        f"1. Use um arquivo de áudio mais curto\n"
+                        f"2. Considere fazer upgrade para dev tier (limite 100MB)\n"
+                        f"3. Divida o áudio em partes menores"
                     )
+                    return
             
             # Envia para API
             self.status_label.config(text="Enviando para transcrição... Por favor, aguarde...")
@@ -259,7 +337,8 @@ class TranscritorAudio:
                     "model": "whisper-large-v3"
                 }
                 
-                response = requests.post(url, headers=headers, files=files, data=data)
+                # Desabilita verificação SSL (resolve problemas com certificados corporativos)
+                response = requests.post(url, headers=headers, files=files, data=data, verify=False)
             
             if response.status_code == 200:
                 transcricao = response.json()["text"]
@@ -282,7 +361,7 @@ class TranscritorAudio:
             messagebox.showerror("Erro", f"Erro inesperado: {str(e)}")
             self.status_label.config(text=f"Erro: {str(e)}")
         finally:
-            # Limpa arquivo temporário
+            # Limpa arquivo temporário se foi criado
             if arquivo_temporario and os.path.exists(arquivo_temporario):
                 try:
                     os.unlink(arquivo_temporario)
